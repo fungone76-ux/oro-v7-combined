@@ -42,10 +42,10 @@ def metrics(df: pd.DataFrame, start: pd.Timestamp | None = None, end: pd.Timesta
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description='Strict no-future fixed 0.01 audit; preserves frozen 3-loss cooldown chronology')
-    ap.add_argument('--strict-out', type=Path, required=True, help='Output directory of run_short_memory_c3_strict.py')
+    ap = argparse.ArgumentParser(description='Strict no-future fixed 0.01 audit with consecutive-loss cooldown DISABLED')
+    ap.add_argument('--strict-out', type=Path, required=True, help='Output directory of run_short_memory_c3_strict_nocooldown.py')
     ap.add_argument('--short-out', type=Path, required=True, help='SHORT_MEMORY training/freeze output directory')
-    ap.add_argument('--out', type=Path, default=Path('research_output/short_memory_fixed001_strict'))
+    ap.add_argument('--out', type=Path, default=Path('research_output/short_memory_fixed001_strict_nocooldown'))
     args = ap.parse_args()
 
     strict_out = args.strict_out.resolve(); short_out = args.short_out.resolve(); out = args.out.resolve(); out.mkdir(parents=True, exist_ok=True)
@@ -55,8 +55,8 @@ def main() -> None:
         raise RuntimeError('STRICT_NO_FUTURE_GUARD_MISSING')
     if float(freeze['fixed_lot']) != 0.01:
         raise RuntimeError('FIXED_LOT_NOT_001')
-    if int(freeze['max_consecutive_losses']) != 3 or int(freeze['cooldown_minutes']) != 30:
-        raise RuntimeError('COOLDOWN_FREEZE_MISMATCH')
+    if freeze.get('loss_cooldown_enabled') is not False or int(freeze.get('cooldown_minutes', -1)) != 0:
+        raise RuntimeError('NO_COOLDOWN_FREEZE_MISMATCH')
 
     trades_path = strict_out / 'trades_c3_strict.csv'
     policy_path = strict_out / 'policy_metrics_c3_strict.csv'
@@ -64,6 +64,10 @@ def main() -> None:
     policy = pd.read_csv(policy_path)
     if trades.empty:
         raise RuntimeError('NO_STRICT_TRADES')
+
+    # The no-cooldown C3 replay must itself show zero cooldown activations.
+    if 'cooldown_count' in policy.columns and int(policy['cooldown_count'].fillna(0).sum()) != 0:
+        raise RuntimeError('COOLDOWN_WAS_ACTIVE_IN_SOURCE_REPLAY')
 
     # Fixed-lot rescaling is exact for linear CFD P&L/commission/spread when the execution path is unchanged.
     lot_col = next((c for c in ['volume', 'lot', 'lot_size', 'lots'] if c in trades.columns), None)
@@ -75,7 +79,6 @@ def main() -> None:
     if lot.isna().any() or (lot <= 0).any():
         raise RuntimeError('INVALID_SOURCE_LOT_VALUES')
 
-    # Cooldown depends on win/loss chronology, not P&L magnitude. Positive scaling preserves every sign.
     source_sign = np.sign(pd.to_numeric(trades['net_pnl'], errors='raise').to_numpy())
     scale = 0.01 / lot.to_numpy(float)
     trades['source_lot'] = lot
@@ -85,7 +88,6 @@ def main() -> None:
     if not np.array_equal(source_sign, fixed_sign):
         raise RuntimeError('WIN_LOSS_CHRONOLOGY_CHANGED')
 
-    # If dynamic sizing never triggered a daily stop, fixed 0.01 cannot retroactively alter which trades existed.
     if 'daily_stop_count' in policy.columns and int(policy['daily_stop_count'].fillna(0).sum()) != 0:
         raise RuntimeError('DAILY_STOP_PRESENT_REQUIRES_FULL_FIXED_LOT_REPLAY')
 
@@ -107,23 +109,22 @@ def main() -> None:
         'positive_pf_segments': int((segment_metrics['profit_factor'] > 1).sum()),
         'positive_expectancy_segments': int((segment_metrics['expectancy_usd'] > 0).sum()),
         'fixed_lot': 0.01,
-        'max_consecutive_losses': 3,
-        'cooldown_minutes': 30,
-        'cooldown_chronology_preserved': True,
+        'loss_cooldown_enabled': False,
+        'cooldown_minutes': 0,
         'strict_no_future_guard': True,
-        'method': 'rescale exact strict executed trade path to 0.01; valid because daily_stop_count=0 and P&L/costs scale linearly with lot',
+        'method': 'rescale exact STRICT NO-COOLDOWN executed trade path to 0.01; valid because daily_stop_count=0 and P&L/costs scale linearly with lot',
     })
 
-    trades.to_csv(out / 'trades_fixed001_strict.csv', index=False)
-    segment_metrics.to_csv(out / 'segment_metrics_fixed001_strict.csv', index=False)
-    (out / 'fixed001_strict_summary.json').write_text(json.dumps(aggregate, indent=2), encoding='utf-8')
+    trades.to_csv(out / 'trades_fixed001_strict_nocooldown.csv', index=False)
+    segment_metrics.to_csv(out / 'segment_metrics_fixed001_strict_nocooldown.csv', index=False)
+    (out / 'fixed001_strict_nocooldown_summary.json').write_text(json.dumps(aggregate, indent=2), encoding='utf-8')
 
-    print('\nFINAL FIXED 0.01 STRICT SUMMARY')
+    print('\nFINAL FIXED 0.01 STRICT NO-COOLDOWN SUMMARY')
     print(segment_metrics.to_string(index=False))
     for k, v in aggregate.items():
         print(f'{k}={v}')
     print('STRICT_NO_FUTURE_GUARD=PASS')
-    print('COOLDOWN_AFTER_3_LOSSES=FROZEN')
+    print('COOLDOWN_AFTER_CONSECUTIVE_LOSSES=DISABLED')
     print('FIXED_LOT_001=PASS')
 
 
