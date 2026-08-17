@@ -27,7 +27,6 @@ def main() -> None:
 
     from xau_bot.research.ml import phase3c_economic_replay as p3c
 
-    # 1) Disable only the consecutive-loss cooldown veto.
     original_register = p3c.RiskManager.register_trade_result
 
     def register_trade_result_no_cooldown(self, is_win, now_utc):
@@ -37,8 +36,6 @@ def main() -> None:
 
     p3c.RiskManager.register_trade_result = register_trade_result_no_cooldown
 
-    # 2) Remove the practical 3-position cap for RESEARCH ONLY.
-    # We use 999 rather than infinity so every comparison remains integer-safe.
     OriginalBotConfig = p3c.BotConfig
 
     def UnlimitedBotConfig(*args, **kwargs):
@@ -51,7 +48,6 @@ def main() -> None:
 
     p3c.BotConfig = UnlimitedBotConfig
 
-    # 3) Surface actual concurrency in the segment report.
     original_variant_metrics = p3c._variant_metrics
 
     def variant_metrics_with_concurrency(segment, variant, result, candidate_decisions, threshold):
@@ -62,6 +58,10 @@ def main() -> None:
         return row
 
     p3c._variant_metrics = variant_metrics_with_concurrency
+
+    # Explicit opt-in consumed only by the strict runner's max-position contract.
+    # No-future, threshold, model and all other guards remain active.
+    os.environ['SHORT_MEMORY_RESEARCH_POSITION_CAP_OVERRIDE'] = '1'
 
     import run_short_memory_c3_strict as strict
 
