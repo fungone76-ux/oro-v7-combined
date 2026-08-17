@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -83,21 +82,18 @@ def patch_no_cooldown(dst: Path) -> None:
     if not path.exists():
         raise RuntimeError(f"missing {path}")
     text = path.read_text(encoding="utf-8")
-    # Preserve loss chronology but never create or enforce a cooldown.
     start = text.find("    def register_trade_result(")
     end = text.find("    def in_cooldown(", start)
     end2 = text.find("    def check_daily_drawdown(", end)
     if start < 0 or end < 0 or end2 < 0:
         raise RuntimeError("risk_manager cooldown methods not found")
     replacement = '''    def register_trade_result(self, is_win: bool, now_utc: datetime) -> None:\n        if is_win:\n            self.state.consecutive_losses = 0\n        else:\n            self.state.consecutive_losses += 1\n        self.state.cooldown_until_utc = None\n\n    def in_cooldown(self, now_utc: datetime) -> bool:\n        return False\n\n'''
-    text = text[:start] + replacement + text[end2:]
-    path.write_text(text, encoding="utf-8")
+    path.write_text(text[:start] + replacement + text[end2:], encoding="utf-8")
 
 
 def write_launchers(dst: Path, runtime_name: str) -> None:
     (dst / "START_DEMO.bat").write_text(
-        "@echo off\r\n"
-        "cd /d %~dp0\r\n"
+        "@echo off\r\ncd /d %~dp0\r\n"
         "if not exist .venv\\Scripts\\python.exe (\r\n"
         "  echo Ambiente mancante. Eseguo INSTALL.bat...\r\n"
         "  call INSTALL.bat || exit /b 1\r\n"
@@ -123,7 +119,7 @@ def write_launchers(dst: Path, runtime_name: str) -> None:
 
 
 def write_verifier(dst: Path, model_rel: str, scaler_rel: str) -> None:
-    code = f'''from pathlib import Path\nimport hashlib, json, re, sys\nROOT=Path(__file__).resolve().parent\nFORBIDDEN={FORBIDDEN_ROOTS!r}\ndef sha(p):\n h=hashlib.sha256();\n with p.open("rb") as f:\n  for c in iter(lambda:f.read(1024*1024),b""): h.update(c)\n return h.hexdigest()\npolicy=json.loads((ROOT/"FINAL_POLICY.json").read_text(encoding="utf-8"))\nassert sha(ROOT/{model_rel!r})==policy["artifact_hashes"]["s2_model_sha256"]\nassert sha(ROOT/{scaler_rel!r})==policy["artifact_hashes"]["s2_scaler_sha256"]\nseq=(ROOT/"xau_bot/research/ml/phase3b2_sequential.py").read_text(encoding="utf-8")\nassert "M1_LENGTH = 8" in seq and "M5_LENGTH = 5" in seq and "M15_LENGTH = 3" in seq\nrisk=(ROOT/"xau_bot/risk/risk_manager.py").read_text(encoding="utf-8")\nassert "def in_cooldown" in risk and "return False" in risk\nfor p in ROOT.rglob("*"):\n if not p.is_file() or p.suffix.lower() not in {{".py",".json",".bat",".txt",".md",".ini"}}: continue\n try: t=p.read_text(encoding="utf-8")\n except Exception: continue\n for bad in FORBIDDEN:\n  if bad.lower() in t.lower(): raise SystemExit(f"FORBIDDEN_EXTERNAL_REFERENCE {{bad}} in {{p}}")\nprint("STANDALONE_VERIFY=PASS")\nprint("sequence_lengths=8/5/3")\nprint("threshold=",policy["s2_threshold"])\nprint("fixed_lot=",policy["fixed_lot"])\nprint("max_positions=",policy["max_positions"])\nprint("cooldown_enabled=",policy["cooldown_enabled"])\n'''
+    code = f'''from pathlib import Path\nimport hashlib, json\nROOT=Path(__file__).resolve().parent\nFORBIDDEN={FORBIDDEN_ROOTS!r}\ndef sha(p):\n h=hashlib.sha256()\n with p.open("rb") as f:\n  for c in iter(lambda:f.read(1024*1024),b""): h.update(c)\n return h.hexdigest()\npolicy=json.loads((ROOT/"FINAL_POLICY.json").read_text(encoding="utf-8"))\nassert sha(ROOT/{model_rel!r})==policy["artifact_hashes"]["s2_model_sha256"]\nassert sha(ROOT/{scaler_rel!r})==policy["artifact_hashes"]["s2_scaler_sha256"]\nseq=(ROOT/"xau_bot/research/ml/phase3b2_sequential.py").read_text(encoding="utf-8")\nassert "M1_LENGTH = 8" in seq and "M5_LENGTH = 5" in seq and "M15_LENGTH = 3" in seq\nrisk=(ROOT/"xau_bot/risk/risk_manager.py").read_text(encoding="utf-8")\nassert "def in_cooldown" in risk and "return False" in risk\nfor p in ROOT.rglob("*"):\n if p.name=="verify_standalone.py": continue\n if not p.is_file() or p.suffix.lower() not in {{".py",".json",".bat",".txt",".md",".ini"}}: continue\n try: t=p.read_text(encoding="utf-8")\n except Exception: continue\n for bad in FORBIDDEN:\n  if bad.lower() in t.lower(): raise SystemExit(f"FORBIDDEN_EXTERNAL_REFERENCE {{bad}} in {{p}}")\nprint("STANDALONE_VERIFY=PASS")\nprint("sequence_lengths=8/5/3")\nprint("threshold=",policy["s2_threshold"])\nprint("fixed_lot=",policy["fixed_lot"])\nprint("max_positions=",policy["max_positions"])\nprint("cooldown_enabled=",policy["cooldown_enabled"])\n'''
     (dst / "verify_standalone.py").write_text(code, encoding="utf-8")
 
 
@@ -154,15 +150,10 @@ def main() -> None:
 
     if dst.exists(): shutil.rmtree(dst)
     dst.mkdir(parents=True)
-
-    # Start from the proven demo runtime restore tree, then overlay the canonical engine package.
     copytree_clean(restore, dst)
-    if (engine / "xau_bot").exists():
-        copytree_clean(engine / "xau_bot", dst / "xau_bot")
-    if (short / "short_memory").exists():
-        copytree_clean(short / "short_memory", dst / "short_memory")
+    if (engine / "xau_bot").exists(): copytree_clean(engine / "xau_bot", dst / "xau_bot")
+    if (short / "short_memory").exists(): copytree_clean(short / "short_memory", dst / "short_memory")
 
-    # Replace exact legacy frozen artifacts wherever the restored runtime expects them.
     model_hits = find_by_hash(dst, OLD_MODEL_SHA)
     scaler_hits = find_by_hash(dst, OLD_SCALER_SHA)
     if not model_hits: raise SystemExit("LEGACY_S2_MODEL_NOT_FOUND_BY_HASH_IN_RESTORE")
@@ -174,7 +165,6 @@ def main() -> None:
     patch_short_memory_contract(dst, new_model_hash, new_scaler_hash)
     patch_no_cooldown(dst)
 
-    # Remove absolute source-root strings from text/config files.
     replacements = {
         str(restore): ".", str(engine): ".", str(short): ".",
         r"D:\oro_top40_restore": ".", r"D:\ORO": ".", r"D:\oro_top40_shortmem": ".",
@@ -183,7 +173,6 @@ def main() -> None:
         if p.is_file() and p.suffix.lower() in {".py", ".json", ".txt", ".md", ".ini", ".bat", ".yaml", ".yml"}:
             replace_text(p, replacements)
 
-    # Keep a canonical local copy of frozen artifacts too.
     local_art = dst / "artifacts"; local_art.mkdir(exist_ok=True)
     shutil.copy2(model, local_art / "selected_short_memory_s2.pt")
     shutil.copy2(scaler, local_art / "short_memory_scalers_s2.joblib")
@@ -201,7 +190,6 @@ def main() -> None:
         "research_benchmark": {"trades": 3530, "win_rate_pct": 64.1643059490085, "profit_factor": 2.5588563899868224, "expectancy_usd": 0.837940509915013, "net_profit_usd": 2957.93},
     }
     (dst / "FINAL_POLICY.json").write_text(json.dumps(policy, indent=2), encoding="utf-8")
-
     (dst / "requirements-final.txt").write_text(
         "MetaTrader5\nnumpy>=1.26,<3\npandas>=2,<3\nscikit-learn==1.8.0\njoblib>=1.3\npyarrow>=15\ntorch==2.11.0\n",
         encoding="utf-8",
