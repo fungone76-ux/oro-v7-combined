@@ -26,6 +26,20 @@ def main() -> None:
     os.chdir(top)
 
     from xau_bot.research.ml import phase3c_economic_replay as p3c
+    import xau_bot.risk.risk_manager as rm
+
+    # RESEARCH ONLY: remove the absolute position-count ceiling from the imported
+    # risk-manager module. This constant is referenced both in __init__ and in
+    # evaluate(), so changing config alone is not sufficient. Other hard caps
+    # (lot, risk %, daily drawdown, spread, SL/TP logic) remain untouched.
+    original_absolute_max_positions = rm.ABSOLUTE_MAX_POSITIONS
+    rm.ABSOLUTE_MAX_POSITIONS = RESEARCH_MAX_POSITIONS
+
+    # p3c imports RiskManager from the same module; its methods resolve the
+    # module-global ABSOLUTE_MAX_POSITIONS at runtime, so this override applies
+    # to both constructor validation and entry evaluation.
+    if getattr(p3c.RiskManager.__init__, '__module__', '') != rm.__name__:
+        raise RuntimeError('RISK_MANAGER_MODULE_MISMATCH')
 
     original_register = p3c.RiskManager.register_trade_result
 
@@ -60,7 +74,6 @@ def main() -> None:
     p3c._variant_metrics = variant_metrics_with_concurrency
 
     # Explicit opt-in consumed only by the strict runner's max-position contract.
-    # No-future, threshold, model and all other guards remain active.
     os.environ['SHORT_MEMORY_RESEARCH_POSITION_CAP_OVERRIDE'] = '1'
 
     import run_short_memory_c3_strict as strict
@@ -75,6 +88,8 @@ def main() -> None:
 
     print('UNLIMITED_POSITIONS_AUDIT=RESEARCH_ONLY', flush=True)
     print(f'RESEARCH_POSITION_CAP={RESEARCH_MAX_POSITIONS}', flush=True)
+    print(f'RISK_MANAGER_ABSOLUTE_CAP_ORIGINAL={original_absolute_max_positions}', flush=True)
+    print(f'RISK_MANAGER_ABSOLUTE_CAP_OVERRIDE={rm.ABSOLUTE_MAX_POSITIONS}', flush=True)
     print('COOLDOWN_AFTER_CONSECUTIVE_LOSSES=DISABLED', flush=True)
     strict.main()
     print('UNLIMITED_POSITIONS_AUDIT=COMPLETE', flush=True)
