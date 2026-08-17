@@ -127,8 +127,11 @@ def main() -> None:
     (out/'strict_replay_guard.json').write_text(json.dumps(guard, indent=2), encoding='utf-8')
 
     cfg = p3c.BotConfig()
-    if cfg.risk.max_open_positions != 3:
+    allow_position_override = os.environ.get('SHORT_MEMORY_RESEARCH_POSITION_CAP_OVERRIDE') == '1'
+    if cfg.risk.max_open_positions != 3 and not allow_position_override:
         raise RuntimeError('MAX_POSITIONS_CONTRACT_BROKEN')
+    if allow_position_override:
+        log(t0, f'RESEARCH POSITION CAP OVERRIDE={cfg.risk.max_open_positions}')
     spec = p3c.load_symbol_spec(p3c.METADATA_PATH)
     m1, m5, m15 = p3c.load_csv(p3c.M1_PATH), p3c.load_csv(p3c.M5_PATH), p3c.load_csv(p3c.M15_PATH)
 
