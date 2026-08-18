@@ -82,8 +82,6 @@ def main() -> None:
     candidates = extracted.candidates
     candidates = candidates[candidates["feature_valid"].astype(bool)].reset_index(drop=True)
 
-    # Canonical Phase 3A labeling step. Labels use future M1 bars only as targets;
-    # they are never part of the causal model input features.
     gaps = pd.DataFrame()
     if not candidates.empty:
         labels = build_candidate_labels(candidates, m1, gaps, spec)
@@ -99,9 +97,9 @@ def main() -> None:
     if missing_labels:
         raise RuntimeError(f"CANDIDATE_LABEL_BUILD_FAILED missing={missing_labels}")
 
+    candidates["timestamp"] = pd.to_datetime(candidates["timestamp"], utc=True)
     start = pd.Timestamp("2026-02-01T00:00:00Z")
     end = pd.Timestamp("2026-06-30T23:59:59Z")
-    candidates["timestamp"] = pd.to_datetime(candidates["timestamp"], utc=True)
     tune_candidates = candidates[(candidates.timestamp >= start) & (candidates.timestamp <= end)].copy()
     if tune_candidates.empty:
         raise RuntimeError("NO_TUNING_CANDIDATES_2026_FEB_JUN")
@@ -114,8 +112,10 @@ def main() -> None:
     out.mkdir(parents=True, exist_ok=True)
     market_path = out / "market_state_2026.parquet"
     cand_path = out / "technical_candidates_feb_jun_2026.parquet"
+    all_cand_path = out / "technical_candidates_all_2026.parquet"
     market.to_parquet(market_path, index=False)
     tune_candidates.to_parquet(cand_path, index=False)
+    candidates.to_parquet(all_cand_path, index=False)
 
     manifest = {
         "sequence_target": "5/3/2",
@@ -128,6 +128,7 @@ def main() -> None:
         "invalid_label_rows_15m_tuning": invalid_labels_15m,
         "market_path": str(market_path),
         "candidate_path": str(cand_path),
+        "all_candidate_path": str(all_cand_path),
         "future_labels_built": True,
         "future_labels_used_as_features": False,
         "lookahead_in_features": False,
@@ -153,6 +154,8 @@ def main() -> None:
     print(f"CANDIDATES_TUNING={len(tune_candidates):,}")
     print(f"VALID_LABELS_15M={valid_labels_15m:,}")
     print(f"INVALID_LABELS_15M={invalid_labels_15m:,}")
+    print("ALL_CANDIDATES_SAVED=PASS")
+    print(f"ALL_CANDIDATES_PATH={all_cand_path}")
     print("FUTURE_LABELS_BUILT=PASS")
     print("FUTURE_LABELS_USED_AS_FEATURES=NO")
     print("TUNING_PERIOD=2026-02-01..2026-06-30")
