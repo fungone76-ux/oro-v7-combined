@@ -4,6 +4,8 @@ import argparse
 import json
 from pathlib import Path
 import sys
+
+import MetaTrader5 as mt5
 import pandas as pd
 
 
@@ -23,9 +25,9 @@ def main() -> None:
     top = a.top40_root.resolve(); data = a.data_dir.resolve(); out = a.out.resolve()
     sys.path.insert(0, str(top))
     from xau_bot.config.settings import BotConfig
+    from xau_bot.core.models import SymbolSpec
     from xau_bot.research.ml.feature_builder import build_market_state_features
     from xau_bot.research.ml.candidate_extractor import extract_strategy_candidates
-    from xau_bot.research.ml import phase3c_economic_replay as p3c
 
     paths = {
         "M1": data / "XAUUSD_M1_FRESH_532_2026_TUNING.csv",
@@ -36,18 +38,39 @@ def main() -> None:
         if not p.exists():
             raise SystemExit(f"MISSING_{k}: {p}")
 
-    # Resolve the symbol metadata from the imported engine root, not from cwd.
-    # p3c.METADATA_PATH is relative by design in the original project, so using it
-    # directly from another repo/cwd is fragile.
-    metadata_path = top / "data" / "historical" / "icmarkets_native" / "manifest.json"
-    if not metadata_path.exists():
-        raise SystemExit(
-            "MISSING_SYMBOL_METADATA: " + str(metadata_path) + "\n"
-            "Expected engine metadata under --top40-root."
+    if not mt5.initialize():
+        raise SystemExit(f"MT5_INIT_FAILED: {mt5.last_error()}")
+    try:
+        info = mt5.symbol_info("XAUUSD")
+        if info is None:
+            raise SystemExit(f"MT5_SYMBOL_INFO_FAILED: {mt5.last_error()}")
+        spec = SymbolSpec(
+            name="XAUUSD",
+            point=float(info.point),
+            digits=int(info.digits),
+            tick_size=float(info.trade_tick_size),
+            tick_value=float(info.trade_tick_value),
+            contract_size=float(info.trade_contract_size),
+            volume_min=float(info.volume_min),
+            volume_max=float(info.volume_max),
+            volume_step=float(info.volume_step),
+            trade_stops_level=int(info.trade_stops_level),
+            filling_mode=int(info.filling_mode),
         )
+        account = mt5.account_info()
+        print(
+            f"MT5_SYMBOL_SPEC=PASS symbol={spec.name} point={spec.point} digits={spec.digits} "
+            f"tick_size={spec.tick_size} tick_value={spec.tick_value} contract_size={spec.contract_size} "
+            f"volume_min={spec.volume_min} volume_step={spec.volume_step}",
+            flush=True,
+        )
+        if account is not None:
+            print(f"MT5_ACCOUNT login={account.login} server={account.server}", flush=True)
+    finally:
+        mt5.shutdown()
 
     m1, m5, m15 = (load_csv(paths[k]) for k in ("M1", "M5", "M15"))
-    cfg = BotConfig(); spec = p3c.load_symbol_spec(metadata_path)
+    cfg = BotConfig()
     market, model_features, diag, _ = build_market_state_features(m1, m5, m15, cfg)
     market = market[market["feature_valid"].astype(bool)].reset_index(drop=True)
     extracted = extract_strategy_candidates(
@@ -79,9 +102,22 @@ def main() -> None:
         "candidate_rows_tuning": int(len(tune_candidates)),
         "market_path": str(market_path),
         "candidate_path": str(cand_path),
-        "metadata_path": str(metadata_path),
         "future_labels_required": True,
         "lookahead_in_features": False,
+        "symbol_spec_source": "MT5 symbol_info(XAUUSD)",
+        "symbol_spec": {
+            "name": spec.name,
+            "point": spec.point,
+            "digits": spec.digits,
+            "tick_size": spec.tick_size,
+            "tick_value": spec.tick_value,
+            "contract_size": spec.contract_size,
+            "volume_min": spec.volume_min,
+            "volume_max": spec.volume_max,
+            "volume_step": spec.volume_step,
+            "trade_stops_level": spec.trade_stops_level,
+            "filling_mode": spec.filling_mode,
+        },
     }
     (out / "PHASE3A_532_MANIFEST.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     print("PHASE3A_532_PREPARE=PASS")
@@ -89,7 +125,7 @@ def main() -> None:
     print(f"CANDIDATES_ALL={len(candidates):,}")
     print(f"CANDIDATES_TUNING={len(tune_candidates):,}")
     print("TUNING_PERIOD=2026-02-01..2026-06-30")
-    print(f"METADATA={metadata_path}")
+    print("SYMBOL_SPEC_SOURCE=MT5")
     print(f"OUTPUT={out}")
 
 
