@@ -94,7 +94,7 @@ def train_fold_with_train_scores(bundle, fold, device: str, t0: float):
     model.load_state_dict(best_state)
     yt, pt = evaluate(model, tr_eval, device)
     yv, pv = evaluate(model, vl, device)
-    return pt.astype(float), pv.astype(float), best_epoch, float(metrics(yv, pv)["spearman"])
+    return yt.astype(float), pt.astype(float), yv.astype(float), pv.astype(float), best_epoch, float(metrics(yv, pv)["spearman"])
 
 
 def main() -> None:
@@ -135,9 +135,10 @@ def main() -> None:
     for fold, (label, start, end) in zip(folds, BLOCKS):
         fid, tr, va, *_ = fold
         print(f"\n=== CALIBRATE/OOS {label} ===", flush=True)
-        train_scores, valid_scores, best_epoch, spearman = train_fold_with_train_scores(bundle, fold, device, t0)
+        train_y, train_scores, valid_y, valid_scores, best_epoch, spearman = train_fold_with_train_scores(bundle, fold, device, t0)
         base = bundle.frame.iloc[va].copy().reset_index(drop=True)
         base["s2_score"] = valid_scores
+        base["y_s2"] = valid_y
         base["validation_block"] = label
         fold_meta.append({"fold": fid, "validation_block": label, "train_rows": len(tr), "valid_rows": len(va), "best_epoch": best_epoch, "spearman": spearman})
 
