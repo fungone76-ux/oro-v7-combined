@@ -28,6 +28,7 @@ def main() -> None:
     from xau_bot.core.models import SymbolSpec
     from xau_bot.research.ml.feature_builder import build_market_state_features
     from xau_bot.research.ml.candidate_extractor import extract_strategy_candidates
+    from xau_bot.research.ml.label_builder import build_candidate_labels
 
     paths = {
         "M1": data / "XAUUSD_M1_FRESH_532_2026_TUNING.csv",
@@ -73,6 +74,7 @@ def main() -> None:
     cfg = BotConfig()
     market, model_features, diag, _ = build_market_state_features(m1, m5, m15, cfg)
     market = market[market["feature_valid"].astype(bool)].reset_index(drop=True)
+
     extracted = extract_strategy_candidates(
         m1, m5, m15, market, model_features, cfg, spec,
         trades_path=None, baseline_scope_end=None,
@@ -80,12 +82,34 @@ def main() -> None:
     candidates = extracted.candidates
     candidates = candidates[candidates["feature_valid"].astype(bool)].reset_index(drop=True)
 
+    # Canonical Phase 3A labeling step. Labels use future M1 bars only as targets;
+    # they are never part of the causal model input features.
+    gaps = pd.DataFrame()
+    if not candidates.empty:
+        labels = build_candidate_labels(candidates, m1, gaps, spec)
+        candidates = pd.concat([candidates.reset_index(drop=True), labels.reset_index(drop=True)], axis=1)
+
+    required_labels = [
+        "label_validity_15m",
+        "directional_future_return_15m",
+        "directional_MFE_price_15m",
+        "directional_MAE_price_15m",
+    ]
+    missing_labels = [c for c in required_labels if c not in candidates.columns]
+    if missing_labels:
+        raise RuntimeError(f"CANDIDATE_LABEL_BUILD_FAILED missing={missing_labels}")
+
     start = pd.Timestamp("2026-02-01T00:00:00Z")
     end = pd.Timestamp("2026-06-30T23:59:59Z")
     candidates["timestamp"] = pd.to_datetime(candidates["timestamp"], utc=True)
     tune_candidates = candidates[(candidates.timestamp >= start) & (candidates.timestamp <= end)].copy()
     if tune_candidates.empty:
         raise RuntimeError("NO_TUNING_CANDIDATES_2026_FEB_JUN")
+
+    valid_labels_15m = int(tune_candidates["label_validity_15m"].astype(str).eq("VALID").sum())
+    invalid_labels_15m = int(len(tune_candidates) - valid_labels_15m)
+    if valid_labels_15m == 0:
+        raise RuntimeError("NO_VALID_15M_LABELS_IN_TUNING_PERIOD")
 
     out.mkdir(parents=True, exist_ok=True)
     market_path = out / "market_state_2026.parquet"
@@ -100,9 +124,12 @@ def main() -> None:
         "market_rows": int(len(market)),
         "candidate_rows_all": int(len(candidates)),
         "candidate_rows_tuning": int(len(tune_candidates)),
+        "valid_label_rows_15m_tuning": valid_labels_15m,
+        "invalid_label_rows_15m_tuning": invalid_labels_15m,
         "market_path": str(market_path),
         "candidate_path": str(cand_path),
-        "future_labels_required": True,
+        "future_labels_built": True,
+        "future_labels_used_as_features": False,
         "lookahead_in_features": False,
         "symbol_spec_source": "MT5 symbol_info(XAUUSD)",
         "symbol_spec": {
@@ -124,6 +151,10 @@ def main() -> None:
     print(f"MARKET_ROWS={len(market):,}")
     print(f"CANDIDATES_ALL={len(candidates):,}")
     print(f"CANDIDATES_TUNING={len(tune_candidates):,}")
+    print(f"VALID_LABELS_15M={valid_labels_15m:,}")
+    print(f"INVALID_LABELS_15M={invalid_labels_15m:,}")
+    print("FUTURE_LABELS_BUILT=PASS")
+    print("FUTURE_LABELS_USED_AS_FEATURES=NO")
     print("TUNING_PERIOD=2026-02-01..2026-06-30")
     print("SYMBOL_SPEC_SOURCE=MT5")
     print(f"OUTPUT={out}")
