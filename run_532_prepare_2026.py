@@ -28,9 +28,9 @@ def main() -> None:
     from xau_bot.research.ml import phase3c_economic_replay as p3c
 
     paths = {
-        "M1": data / "XAUUSD_M1_FRESH_532_2026.csv",
-        "M5": data / "XAUUSD_M5_FRESH_532_2026.csv",
-        "M15": data / "XAUUSD_M15_FRESH_532_2026.csv",
+        "M1": data / "XAUUSD_M1_FRESH_532_2026_TUNING.csv",
+        "M5": data / "XAUUSD_M5_FRESH_532_2026_TUNING.csv",
+        "M15": data / "XAUUSD_M15_FRESH_532_2026_TUNING.csv",
     }
     for k, p in paths.items():
         if not p.exists():
