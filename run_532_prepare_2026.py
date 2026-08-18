@@ -36,8 +36,18 @@ def main() -> None:
         if not p.exists():
             raise SystemExit(f"MISSING_{k}: {p}")
 
+    # Resolve the symbol metadata from the imported engine root, not from cwd.
+    # p3c.METADATA_PATH is relative by design in the original project, so using it
+    # directly from another repo/cwd is fragile.
+    metadata_path = top / "data" / "historical" / "icmarkets_native" / "manifest.json"
+    if not metadata_path.exists():
+        raise SystemExit(
+            "MISSING_SYMBOL_METADATA: " + str(metadata_path) + "\n"
+            "Expected engine metadata under --top40-root."
+        )
+
     m1, m5, m15 = (load_csv(paths[k]) for k in ("M1", "M5", "M15"))
-    cfg = BotConfig(); spec = p3c.load_symbol_spec(p3c.METADATA_PATH)
+    cfg = BotConfig(); spec = p3c.load_symbol_spec(metadata_path)
     market, model_features, diag, _ = build_market_state_features(m1, m5, m15, cfg)
     market = market[market["feature_valid"].astype(bool)].reset_index(drop=True)
     extracted = extract_strategy_candidates(
@@ -69,6 +79,7 @@ def main() -> None:
         "candidate_rows_tuning": int(len(tune_candidates)),
         "market_path": str(market_path),
         "candidate_path": str(cand_path),
+        "metadata_path": str(metadata_path),
         "future_labels_required": True,
         "lookahead_in_features": False,
     }
@@ -78,6 +89,7 @@ def main() -> None:
     print(f"CANDIDATES_ALL={len(candidates):,}")
     print(f"CANDIDATES_TUNING={len(tune_candidates):,}")
     print("TUNING_PERIOD=2026-02-01..2026-06-30")
+    print(f"METADATA={metadata_path}")
     print(f"OUTPUT={out}")
 
 
