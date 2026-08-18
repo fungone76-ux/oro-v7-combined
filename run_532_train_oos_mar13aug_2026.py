@@ -142,7 +142,7 @@ def main() -> None:
     t0 = time.perf_counter()
 
     market_path = args.phase3a / "market_state_mar13aug_2026.parquet"
-    candidates_path = args.phase3a / "technical_candidates_mar13aug_2026.parquet"
+    candidates_path = args.phase3a / "technical_candidates_mar13aug_valid.parquet"
     for p in (market_path, candidates_path):
         if not p.exists():
             raise SystemExit(f"MISSING_INPUT: {p}")
