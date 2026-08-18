@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -36,35 +35,58 @@ def main() -> None:
     if missing:
         raise SystemExit(f"MISSING_REQUIRED_COLUMNS: {missing}")
 
-    confirmation_cols = sorted(c for c in df.columns if c.startswith("confirmation_") and c not in {"confirmation_count"})
+    confirmation_cols = sorted(
+        c for c in df.columns
+        if c.startswith("confirmation_") and c != "confirmation_count"
+    )
     df = df[df["label_validity_15m"].astype(str).eq("VALID")].copy()
-    df["confirmation_combo"] = df.apply(lambda r: combo_from_row(r, confirmation_cols), axis=1)
+    df["confirmation_combo"] = df.apply(
+        lambda r: combo_from_row(r, confirmation_cols), axis=1
+    )
+
     atr = pd.to_numeric(df["atr14"], errors="coerce").replace(0, np.nan)
     df["quality_r"] = (
         pd.to_numeric(df["directional_MFE_price_15m"], errors="coerce") / atr
         - (pd.to_numeric(df["directional_MAE_price_15m"], errors="coerce") / atr).abs()
     )
-    df["directional_positive_15m"] = pd.to_numeric(df["directional_future_return_15m"], errors="coerce") > 0
+    df["directional_positive_15m"] = (
+        pd.to_numeric(df["directional_future_return_15m"], errors="coerce") > 0
+    )
 
-    def summarize(g: pd.DataFrame) -> pd.Series:
+    def summarize(g: pd.DataFrame) -> dict[str, float | int]:
         q = pd.to_numeric(g["quality_r"], errors="coerce")
-        return pd.Series({
-            "candidates": len(g),
-            "pct_total": len(g) / len(df) * 100.0,
-            "positive_15m_pct": g["directional_positive_15m"].mean() * 100.0,
-            "mean_quality_r": q.mean(),
-            "median_quality_r": q.median(),
-            "mean_signal_score": pd.to_numeric(g["signal_score"], errors="coerce").mean(),
-            "mean_confirmations": pd.to_numeric(g["confirmation_count"], errors="coerce").mean(),
-        })
+        return {
+            "candidates": int(len(g)),
+            "pct_total": float(len(g) / len(df) * 100.0),
+            "positive_15m_pct": float(g["directional_positive_15m"].mean() * 100.0),
+            "mean_quality_r": float(q.mean()),
+            "median_quality_r": float(q.median()),
+            "mean_signal_score": float(pd.to_numeric(g["signal_score"], errors="coerce").mean()),
+            "mean_confirmations": float(pd.to_numeric(g["confirmation_count"], errors="coerce").mean()),
+        }
 
-    by_combo = df.groupby(["direction", "confirmation_combo"], dropna=False).apply(summarize, include_groups=False).reset_index()
-    by_combo = by_combo.sort_values(["candidates", "mean_quality_r"], ascending=[False, False])
+    def grouped(keys: list[str]) -> pd.DataFrame:
+        rows: list[dict[str, object]] = []
+        grouper = keys[0] if len(keys) == 1 else keys
+        for key_values, g in df.groupby(grouper, dropna=False, sort=False):
+            if len(keys) == 1:
+                key_values = (key_values,)
+            elif not isinstance(key_values, tuple):
+                key_values = (key_values,)
+            row = {k: v for k, v in zip(keys, key_values)}
+            row.update(summarize(g))
+            rows.append(row)
+        return pd.DataFrame(rows)
 
-    by_count = df.groupby(["direction", "confirmation_count"], dropna=False).apply(summarize, include_groups=False).reset_index()
+    by_combo = grouped(["direction", "confirmation_combo"])
+    by_combo = by_combo.sort_values(
+        ["candidates", "mean_quality_r"], ascending=[False, False]
+    )
+
+    by_count = grouped(["direction", "confirmation_count"])
     by_count = by_count.sort_values(["direction", "confirmation_count"])
 
-    by_score = df.groupby(["direction", "signal_score"], dropna=False).apply(summarize, include_groups=False).reset_index()
+    by_score = grouped(["direction", "signal_score"])
     by_score = by_score.sort_values(["direction", "signal_score"])
 
     OUT.mkdir(parents=True, exist_ok=True)
@@ -77,6 +99,10 @@ def main() -> None:
     print(f"CONFIRMATION_COLUMNS={len(confirmation_cols)}")
     print("TOP_COMBINATIONS")
     print(by_combo.head(20).to_string(index=False))
+    print("\nBY_CONFIRMATION_COUNT")
+    print(by_count.to_string(index=False))
+    print("\nBY_SIGNAL_SCORE")
+    print(by_score.to_string(index=False))
     print(f"OUTPUT={OUT}")
 
 
