@@ -1,0 +1,24 @@
+{
+  "original_repository": "fungone76-ux/oro",
+  "original_commit": "0158dab30d2179eedace26fb73618548cd674bb4",
+  "original_system": "XAUUSD TOP40 PHASE_3E2 lineage",
+  "reference_files": {
+    "xau_bot/research/ml/candidate_extractor.py": "473c6da3d012edf9db9075be2396d7c6143604ff",
+    "xau_bot/research/ml/dataset_builder.py": "1693842c930192afb2b17e97cbf1cafb7335a428",
+    "xau_bot/research/ml/feature_builder.py": "b970b861eb9ba71e7d55398d6c8762445524195b",
+    "xau_bot/research/ml/label_builder.py": "229f2b53b6cc14be0541336f6d317a1d1541044f",
+    "xau_bot/research/ml/phase3b2_sequential.py": "75f8e1c6b82db8087e6b18b92515f8f562644162",
+    "xau_bot/research/ml/phase3c2_top40_challenger.py": "b5e62e0eb78311f10daf71a5f9a03dfc2e208b0f",
+    "xau_bot/research/ml/phase3c_economic_replay.py": "babb793a374721b49a6dfad98c56e92b2fa224e7",
+    "xau_bot/research/ml/phase3d_causal_audit.py": "5d7a608c36d57924a6425206160aeced2b24e2ec",
+    "xau_bot/research/ml/phase3e2_blind_retro_holdout.py": "53874584cc9c15175c5c4a7329def271ef9b892b"
+  },
+  "original_frozen_artifacts": {
+    "s2_model_sha256": "ee120a3623375b000c1d65d47debb9c0c3edbb92ee36c978ce3f14578e03035b",
+    "s2_scaler_sha256": "73b1548cb5e2e2659b9d332128bf625663ca3eee26f29beaa5ea24b13d5999ac",
+    "sequence_manifest_sha256": "3791133765c7610bfb4f1946001eb1a30dda204ccf6637cca07fb676dc5ca906"
+  },
+  "original_sequence_lengths": {"m1": 60, "m5": 24, "m15": 16},
+  "experimental_sequence_lengths": {"m1": 8, "m5": 5, "m15": 3},
+  "rule": "SHORT_MEMORY_V1 changes sequence length only in the first structural experiment; old S2 weights and thresholds are benchmark-only and must not be reused as the new model."
+}

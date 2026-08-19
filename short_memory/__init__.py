@@ -1,0 +1,5 @@
+"""TOP40 SHORT_MEMORY V1 research package."""
+
+from .config import CONFIG, MODEL_ARCHITECTURE, RESEARCH_VERSION
+
+__all__ = ["CONFIG", "MODEL_ARCHITECTURE", "RESEARCH_VERSION"]
