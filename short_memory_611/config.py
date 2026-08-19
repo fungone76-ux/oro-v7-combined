@@ -3,8 +3,9 @@
 Contract:
 - evaluate after every closed M1;
 - use the last 6 closed M1 bars for timing;
-- use one last-closed M5 only for directional context (EMA9 vs EMA21);
-- use one last-closed M15 only for directional confirmation (close vs EMA50);
+- use one last-closed M5 for primary direction (EMA9 vs EMA21);
+- use one last-closed M15 for directional context (close vs EMA50);
+- M5/M15 disagreement NEVER deletes a sample: disagreement is an explicit feature;
 - theoretical entry is the next M1 open;
 - no live orders are implemented in this package.
 """
@@ -40,5 +41,5 @@ MODEL_ARCHITECTURE = {
     "dropout": 0.1,
 }
 
-RESEARCH_VERSION = "TOP40_M1_TIMING_611_MAR13AUG_2026_V1"
-METHODOLOGY_STATUS = "FROZEN_BEFORE_FIRST_611_PREPARE"
+RESEARCH_VERSION = "TOP40_M1_TIMING_611_MAR13AUG_2026_V2_CONFLICT_AWARE"
+METHODOLOGY_STATUS = "FROZEN_BEFORE_FIRST_VALID_611_PREPARE"
