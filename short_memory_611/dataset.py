@@ -12,8 +12,8 @@ M1_FEATURES = [
     "open", "high", "low", "close", "range", "body", "upper_wick", "lower_wick",
     "return_1", "ema9", "ema21", "atr14", "tick_volume_z20",
 ]
-M5_FEATURES = ["m5_open", "m5_high", "m5_low", "m5_close", "ema9", "ema21", "atr14_m5"]
-M15_FEATURES = ["m15_open", "m15_high", "m15_low", "m15_close", "ema50"]
+M5_FEATURES = ["m5_open", "m5_high", "m5_low", "m5_close", "ema9_m5", "ema21_m5", "atr14_m5"]
+M15_FEATURES = ["m15_open", "m15_high", "m15_low", "m15_close", "ema50_m15"]
 STATIC_FEATURES = ["direction_sign", "m15_direction_sign", "direction_agreement", "trend_conflict"]
 
 
@@ -64,6 +64,10 @@ def build_tensor_bundle(root: Path) -> TensorBundle611:
     frame = samples.iloc[keep].reset_index(drop=True)
     if frame.empty:
         raise RuntimeError("NO_VALID_611_SEQUENCES")
+
+    missing = [c for c in M5_FEATURES + M15_FEATURES if c not in frame.columns]
+    if missing:
+        raise RuntimeError(f"MISSING_611_CONTEXT_FEATURES: {missing}")
 
     m5 = frame[M5_FEATURES].astype(float).to_numpy(np.float32)[:, None, :]
     m15 = frame[M15_FEATURES].astype(float).to_numpy(np.float32)[:, None, :]
