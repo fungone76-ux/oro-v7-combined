@@ -2,18 +2,19 @@ from __future__ import annotations
 
 """Prepare the isolated 6/1/1 every-M1 timing research dataset.
 
-This script DOES NOT trade and DOES NOT modify the two demo runtimes.
+RESEARCH ONLY: this script never sends MT5 orders and never modifies the two
+running demo bots.
 
 Causal contract
 ---------------
-At each closed M1 bar:
-  * timing context = last 6 closed M1 bars (materialized later by the tensor builder);
-  * M5 direction = EMA9 > EMA21 => LONG, EMA9 < EMA21 => SHORT;
-  * M15 direction = close > EMA50 => LONG, close < EMA50 => SHORT;
-  * a sample exists only when M5 and M15 agree;
-  * theoretical entry = next M1 open;
-  * 15-minute future path is used only to build labels, never features;
-  * no feature or label is allowed to touch 2026-08-14 or later.
+At every closed M1 bar T:
+  * timing context: last 6 closed M1 bars;
+  * primary direction: last closed M5, EMA9 vs EMA21;
+  * context direction: last closed M15, close vs EMA50;
+  * M5/M15 disagreement is KEPT as a sample and encoded as trend_conflict=1;
+  * theoretical entry: next M1 open at T;
+  * future 15-minute path builds labels only;
+  * no feature or label may touch 2026-08-14 or later.
 """
 
 from pathlib import Path
@@ -27,7 +28,7 @@ from short_memory_611.config import CONFIG, RESEARCH_VERSION
 SOURCE = Path(r"D:\ORO_532_MAR13AUG_2026")
 OUT = Path(r"D:\ORO_611_MAR13AUG_2026")
 UNSEEN_START = pd.Timestamp(CONFIG.unseen_start_utc)
-HORIZON = CONFIG.label_horizon_minutes
+HORIZON = int(CONFIG.label_horizon_minutes)
 
 
 def load_tf(name: str) -> pd.DataFrame:
@@ -42,17 +43,21 @@ def load_tf(name: str) -> pd.DataFrame:
 def true_range(df: pd.DataFrame) -> pd.Series:
     prev = df["close"].shift(1)
     return pd.concat(
-        [
-            (df["high"] - df["low"]).abs(),
-            (df["high"] - prev).abs(),
-            (df["low"] - prev).abs(),
-        ],
+        [(df["high"]-df["low"]).abs(), (df["high"]-prev).abs(), (df["low"]-prev).abs()],
         axis=1,
     ).max(axis=1)
 
 
-def add_m1_features(m1: pd.DataFrame) -> pd.DataFrame:
-    x = m1.copy()
+def rsi14(close: pd.Series) -> pd.Series:
+    d = close.diff()
+    up = d.clip(lower=0).ewm(alpha=1/14, adjust=False).mean()
+    dn = (-d.clip(upper=0)).ewm(alpha=1/14, adjust=False).mean()
+    rs = up / dn.replace(0, np.nan)
+    return 100.0 - 100.0 / (1.0 + rs)
+
+
+def add_m1_features(df: pd.DataFrame) -> pd.DataFrame:
+    x = df.copy()
     x["close_time"] = x["time"] + pd.Timedelta(minutes=1)
     x["range"] = x["high"] - x["low"]
     x["body"] = x["close"] - x["open"]
@@ -61,101 +66,112 @@ def add_m1_features(m1: pd.DataFrame) -> pd.DataFrame:
     x["return_1"] = x["close"].pct_change()
     x["ema9"] = x["close"].ewm(span=9, adjust=False).mean()
     x["ema21"] = x["close"].ewm(span=21, adjust=False).mean()
-    x["atr14"] = true_range(x).ewm(alpha=1 / 14, adjust=False).mean()
+    x["ema_gap"] = x["ema9"] - x["ema21"]
+    x["rsi14"] = rsi14(x["close"])
+    x["atr14"] = true_range(x).ewm(alpha=1/14, adjust=False).mean()
     vol = pd.to_numeric(x.get("tick_volume", 0), errors="coerce").fillna(0.0)
-    x["tick_volume_z20"] = (vol - vol.rolling(20).mean()) / vol.rolling(20).std(ddof=0).replace(0, np.nan)
+    mean20 = vol.rolling(20).mean()
+    std20 = vol.rolling(20).std(ddof=0).replace(0, np.nan)
+    x["tick_volume_z20"] = (vol - mean20) / std20
     return x
 
 
-def add_m5_direction(m5: pd.DataFrame) -> pd.DataFrame:
-    x = m5.copy()
+def add_m5_features(df: pd.DataFrame) -> pd.DataFrame:
+    x = df.copy()
     x["close_time"] = x["time"] + pd.Timedelta(minutes=5)
     x["ema9"] = x["close"].ewm(span=9, adjust=False).mean()
     x["ema21"] = x["close"].ewm(span=21, adjust=False).mean()
-    x["atr14"] = true_range(x).ewm(alpha=1 / 14, adjust=False).mean()
-    x["direction_m5"] = np.where(x["ema9"] > x["ema21"], "LONG", np.where(x["ema9"] < x["ema21"], "SHORT", "NONE"))
+    x["ema_gap"] = x["ema9"] - x["ema21"]
+    x["atr14"] = true_range(x).ewm(alpha=1/14, adjust=False).mean()
+    x["rsi14"] = rsi14(x["close"])
+    x["direction_m5"] = np.where(x["ema_gap"] > 0, "LONG", np.where(x["ema_gap"] < 0, "SHORT", "NONE"))
     return x
 
 
-def add_m15_direction(m15: pd.DataFrame) -> pd.DataFrame:
-    x = m15.copy()
+def add_m15_features(df: pd.DataFrame) -> pd.DataFrame:
+    x = df.copy()
     x["close_time"] = x["time"] + pd.Timedelta(minutes=15)
     x["ema50"] = x["close"].ewm(span=50, adjust=False).mean()
-    x["direction_m15"] = np.where(x["close"] > x["ema50"], "LONG", np.where(x["close"] < x["ema50"], "SHORT", "NONE"))
+    x["trend_gap"] = x["close"] - x["ema50"]
+    x["direction_m15"] = np.where(x["trend_gap"] > 0, "LONG", np.where(x["trend_gap"] < 0, "SHORT", "NONE"))
     return x
 
 
-def build_samples(m1f: pd.DataFrame, m5f: pd.DataFrame, m15f: pd.DataFrame) -> pd.DataFrame:
-    # Decision timestamp is the close of each M1 bar.
+def exact_six_m1_available(m1f: pd.DataFrame, ts: pd.Timestamp) -> bool:
+    closes = m1f["close_time"].to_numpy(dtype="datetime64[ns]")
+    end = int(np.searchsorted(closes, ts.to_datetime64(), side="right") - 1)
+    start = end - CONFIG.m1_length + 1
+    if start < 0:
+        return False
+    seq = closes[start:end+1]
+    if len(seq) != CONFIG.m1_length or seq[-1] > ts.to_datetime64():
+        return False
+    d = np.diff(seq).astype("timedelta64[m]").astype(int)
+    return bool(np.all(d == 1))
+
+
+def build_samples(m1f: pd.DataFrame, m5f: pd.DataFrame, m15f: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
+    # One potential sample for every closed M1.
     base = m1f[["time", "close_time", "close", "atr14"]].copy()
-    base = base.rename(columns={"time": "m1_open_time", "close_time": "timestamp", "close": "m1_close", "atr14": "atr14_m1"})
+    base.columns = ["m1_open_time", "timestamp", "m1_close", "atr14_m1"]
     base = base[base["timestamp"] < UNSEEN_START].sort_values("timestamp")
 
-    m5_ctx = m5f[["close_time", "time", "open", "high", "low", "close", "ema9", "ema21", "atr14", "direction_m5"]].copy()
-    m5_ctx = m5_ctx.rename(columns={
-        "close_time": "m5_source_close_time",
-        "time": "m5_open_time",
-        "open": "m5_open",
-        "high": "m5_high",
-        "low": "m5_low",
-        "close": "m5_close",
-        "atr14": "atr14_m5",
+    m5ctx = m5f[["close_time","time","open","high","low","close","ema9","ema21","ema_gap","atr14","rsi14","direction_m5"]].copy()
+    m5ctx = m5ctx.rename(columns={
+        "close_time":"m5_source_close_time", "time":"m5_open_time", "open":"m5_open",
+        "high":"m5_high", "low":"m5_low", "close":"m5_close", "atr14":"atr14_m5",
+        "rsi14":"rsi14_m5", "ema9":"ema9_m5", "ema21":"ema21_m5", "ema_gap":"ema_gap_m5",
     }).sort_values("m5_source_close_time")
 
-    m15_ctx = m15f[["close_time", "time", "open", "high", "low", "close", "ema50", "direction_m15"]].copy()
-    m15_ctx = m15_ctx.rename(columns={
-        "close_time": "m15_source_close_time",
-        "time": "m15_open_time",
-        "open": "m15_open",
-        "high": "m15_high",
-        "low": "m15_low",
-        "close": "m15_close",
+    m15ctx = m15f[["close_time","time","open","high","low","close","ema50","trend_gap","direction_m15"]].copy()
+    m15ctx = m15ctx.rename(columns={
+        "close_time":"m15_source_close_time", "time":"m15_open_time", "open":"m15_open",
+        "high":"m15_high", "low":"m15_low", "close":"m15_close", "ema50":"ema50_m15",
+        "trend_gap":"trend_gap_m15",
     }).sort_values("m15_source_close_time")
 
-    out = pd.merge_asof(base, m5_ctx, left_on="timestamp", right_on="m5_source_close_time", direction="backward")
-    out = pd.merge_asof(out.sort_values("timestamp"), m15_ctx, left_on="timestamp", right_on="m15_source_close_time", direction="backward")
+    x = pd.merge_asof(base, m5ctx, left_on="timestamp", right_on="m5_source_close_time", direction="backward")
+    x = pd.merge_asof(x.sort_values("timestamp"), m15ctx, left_on="timestamp", right_on="m15_source_close_time", direction="backward")
+    x = x[
+        x["m5_source_close_time"].notna() & x["m15_source_close_time"].notna()
+        & (x["m5_source_close_time"] <= x["timestamp"])
+        & (x["m15_source_close_time"] <= x["timestamp"])
+        & x["direction_m5"].isin(["LONG","SHORT"])
+        & x["direction_m15"].isin(["LONG","SHORT"])
+    ].copy()
 
-    causal = (
-        out["m5_source_close_time"].notna()
-        & out["m15_source_close_time"].notna()
-        & (out["m5_source_close_time"] <= out["timestamp"])
-        & (out["m15_source_close_time"] <= out["timestamp"])
-    )
-    out = out[causal].copy()
-    out = out[(out["direction_m5"] == out["direction_m15"]) & out["direction_m5"].isin(["LONG", "SHORT"])].copy()
-    out["direction"] = out["direction_m5"]
-    out["candidate_entry_time"] = out["timestamp"]
+    # IMPORTANT: disagreement is a feature, not a filter.
+    x["direction"] = x["direction_m5"]
+    x["direction_agreement"] = (x["direction_m5"] == x["direction_m15"]).astype(np.int8)
+    x["trend_conflict"] = (1 - x["direction_agreement"]).astype(np.int8)
+    x["m15_same_as_primary"] = x["direction_agreement"]
+    x["candidate_entry_time"] = x["timestamp"]
 
-    # Map entry at next M1 open (which starts exactly at decision timestamp when data are continuous).
-    m1_index = m1f.set_index("time", drop=False)
+    m1_times = m1f["time"].to_numpy(dtype="datetime64[ns]")
     records: list[dict[str, object]] = []
-    excluded_no_entry = 0
-    excluded_incomplete_label = 0
-    excluded_aug14_spill = 0
+    stats = {"no_six_m1":0, "no_entry":0, "incomplete_future":0, "aug14_spill":0, "bad_atr":0}
 
-    for row in out.itertuples(index=False):
-        decision_time = pd.Timestamp(row.timestamp)
-        if decision_time not in m1_index.index:
-            excluded_no_entry += 1
+    for row in x.itertuples(index=False):
+        ts = pd.Timestamp(row.timestamp)
+        if not exact_six_m1_available(m1f, ts):
+            stats["no_six_m1"] += 1
             continue
-        entry_pos_arr = np.flatnonzero(m1f["time"].to_numpy(dtype="datetime64[ns]") == decision_time.to_datetime64())
-        if len(entry_pos_arr) == 0:
-            excluded_no_entry += 1
+        entry_idx = int(np.searchsorted(m1_times, ts.to_datetime64(), side="left"))
+        if entry_idx >= len(m1f) or m1_times[entry_idx] != ts.to_datetime64():
+            stats["no_entry"] += 1
             continue
-        entry_pos = int(entry_pos_arr[0])
-        end_pos = entry_pos + HORIZON - 1
-        if end_pos >= len(m1f):
-            excluded_incomplete_label += 1
+        end_idx = entry_idx + HORIZON - 1
+        if end_idx >= len(m1f):
+            stats["incomplete_future"] += 1
             continue
-        future = m1f.iloc[entry_pos : end_pos + 1]
+        future = m1f.iloc[entry_idx:end_idx+1]
+        diffs = future["time"].diff().dropna().dt.total_seconds().div(60.0).to_numpy(float)
+        if len(future) != HORIZON or not bool(np.all(np.isclose(diffs, 1.0))):
+            stats["incomplete_future"] += 1
+            continue
         label_end = pd.Timestamp(future["time"].iloc[-1]) + pd.Timedelta(minutes=1)
         if label_end > UNSEEN_START:
-            excluded_aug14_spill += 1
-            continue
-        # Require exact continuous future M1 path.
-        diffs = future["time"].diff().dropna().dt.total_seconds().div(60.0)
-        if len(future) != HORIZON or not bool(np.all(np.isclose(diffs.to_numpy(float), 1.0))):
-            excluded_incomplete_label += 1
+            stats["aug14_spill"] += 1
             continue
 
         entry = float(future["open"].iloc[0])
@@ -170,8 +186,8 @@ def build_samples(m1f: pd.DataFrame, m5f: pd.DataFrame, m15f: pd.DataFrame) -> p
             endpoint = float(entry - future["close"].iloc[-1])
         atr = float(row.atr14_m5)
         if not np.isfinite(atr) or atr <= 0:
+            stats["bad_atr"] += 1
             continue
-        quality_r = mfe / atr - abs(mae / atr)
 
         rec = row._asdict()
         rec.update({
@@ -180,103 +196,82 @@ def build_samples(m1f: pd.DataFrame, m5f: pd.DataFrame, m15f: pd.DataFrame) -> p
             "directional_MFE_price_15m": mfe,
             "directional_MAE_price_15m": mae,
             "directional_future_return_15m": endpoint,
-            "label_quality_r": quality_r,
+            "label_quality_r": mfe / atr - abs(mae / atr),
             "label_validity_15m": "VALID",
         })
         records.append(rec)
 
-    samples = pd.DataFrame.from_records(records)
-    samples.attrs["excluded_no_entry"] = excluded_no_entry
-    samples.attrs["excluded_incomplete_label"] = excluded_incomplete_label
-    samples.attrs["excluded_aug14_spill"] = excluded_aug14_spill
-    return samples
+    return pd.DataFrame.from_records(records), stats
 
 
 def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
-    m1 = load_tf("M1")
-    m5 = load_tf("M5")
-    m15 = load_tf("M15")
-
-    m1f = add_m1_features(m1)
-    m5f = add_m5_direction(m5)
-    m15f = add_m15_direction(m15)
-    samples = build_samples(m1f, m5f, m15f)
+    m1f = add_m1_features(load_tf("M1"))
+    m5f = add_m5_features(load_tf("M5"))
+    m15f = add_m15_features(load_tf("M15"))
+    samples, exclusions = build_samples(m1f, m5f, m15f)
     if samples.empty:
         raise RuntimeError("NO_611_SAMPLES")
 
-    # Guard: 6 closed M1 bars must exist and be continuous before each sample.
-    m1_close_times = m1f["close_time"].to_numpy(dtype="datetime64[ns]")
-    valid_six = []
-    for ts in pd.to_datetime(samples["timestamp"], utc=True):
-        end = int(np.searchsorted(m1_close_times, ts.to_datetime64(), side="right") - 1)
-        start = end - CONFIG.m1_length + 1
-        ok = start >= 0
-        if ok:
-            seq = m1_close_times[start : end + 1]
-            diffs = np.diff(seq).astype("timedelta64[m]").astype(int)
-            ok = len(seq) == CONFIG.m1_length and bool(np.all(diffs == 1)) and seq[-1] <= ts.to_datetime64()
-        valid_six.append(ok)
-    samples = samples[np.asarray(valid_six, dtype=bool)].reset_index(drop=True)
-
-    if (pd.to_datetime(samples["timestamp"], utc=True) >= UNSEEN_START).any():
-        raise RuntimeError("AUG14_PRESENT_IN_611_FEATURE_TIMESTAMPS")
-    if (pd.to_datetime(samples["label_end_time"], utc=True) > UNSEEN_START).any():
-        raise RuntimeError("AUG14_PRESENT_IN_611_LABELS")
-    if (pd.to_datetime(samples["m5_source_close_time"], utc=True) > pd.to_datetime(samples["timestamp"], utc=True)).any():
-        raise RuntimeError("M5_LOOKAHEAD")
-    if (pd.to_datetime(samples["m15_source_close_time"], utc=True) > pd.to_datetime(samples["timestamp"], utc=True)).any():
-        raise RuntimeError("M15_LOOKAHEAD")
+    ts = pd.to_datetime(samples["timestamp"], utc=True)
+    le = pd.to_datetime(samples["label_end_time"], utc=True)
+    if (ts >= UNSEEN_START).any() or (le > UNSEEN_START).any():
+        raise RuntimeError("AUG14_LEAK_611")
+    if (pd.to_datetime(samples["m5_source_close_time"], utc=True) > ts).any():
+        raise RuntimeError("M5_LOOKAHEAD_611")
+    if (pd.to_datetime(samples["m15_source_close_time"], utc=True) > ts).any():
+        raise RuntimeError("M15_LOOKAHEAD_611")
 
     m1f.to_parquet(OUT / "m1_features_611.parquet", index=False)
-    m5f.to_parquet(OUT / "m5_direction_611.parquet", index=False)
-    m15f.to_parquet(OUT / "m15_direction_611.parquet", index=False)
+    m5f.to_parquet(OUT / "m5_context_611.parquet", index=False)
+    m15f.to_parquet(OUT / "m15_context_611.parquet", index=False)
     samples.to_parquet(OUT / "samples_611_mar13aug.parquet", index=False)
 
-    market_days = int(pd.to_datetime(samples["timestamp"], utc=True).dt.date.nunique())
-    longs = int((samples["direction"] == "LONG").sum())
-    shorts = int((samples["direction"] == "SHORT").sum())
-    per_day = len(samples) / market_days if market_days else float("nan")
-    by_month = (
-        samples.assign(month=pd.to_datetime(samples["timestamp"], utc=True).dt.strftime("%Y-%m"))
-        .groupby("month")
-        .agg(samples=("direction", "size"), longs=("direction", lambda s: int((s == "LONG").sum())), shorts=("direction", lambda s: int((s == "SHORT").sum())))
-        .reset_index()
-    )
+    days = int(ts.dt.date.nunique())
+    agreement = int(samples["direction_agreement"].sum())
+    conflicts = int(samples["trend_conflict"].sum())
+    by_month = samples.assign(month=ts.dt.strftime("%Y-%m")).groupby("month").agg(
+        samples=("direction","size"),
+        longs=("direction", lambda s: int((s=="LONG").sum())),
+        shorts=("direction", lambda s: int((s=="SHORT").sum())),
+        agreement=("direction_agreement","sum"),
+        conflicts=("trend_conflict","sum"),
+        mean_quality_r=("label_quality_r","mean"),
+    ).reset_index()
 
     manifest = {
         "research_version": RESEARCH_VERSION,
-        "source": str(SOURCE),
-        "output": str(OUT),
-        "sequence": {"m1": 6, "m5": 1, "m15": 1},
-        "decision_frequency": "EVERY_CLOSED_M1",
-        "m5_role": "DIRECTION_ONLY_EMA9_VS_EMA21",
-        "m15_role": "DIRECTION_ONLY_CLOSE_VS_EMA50",
-        "direction_contract": "M5_AND_M15_MUST_AGREE",
-        "entry_contract": "DECISION_AFTER_CLOSED_M1_THEN_ENTRY_NEXT_M1_OPEN",
-        "label_horizon_minutes": HORIZON,
-        "samples": int(len(samples)),
-        "market_days": market_days,
-        "samples_per_market_day": per_day,
-        "longs": longs,
-        "shorts": shorts,
-        "unseen_start": UNSEEN_START.isoformat(),
-        "aug14_used": False,
+        "sequence": {"m1":6,"m5":1,"m15":1},
+        "decision_frequency":"EVERY_CLOSED_M1",
+        "primary_direction":"LAST_CLOSED_M5_EMA9_VS_EMA21",
+        "m15_context":"LAST_CLOSED_M15_CLOSE_VS_EMA50",
+        "conflict_policy":"KEEP_SAMPLE_AND_ENCODE_TREND_CONFLICT",
+        "entry_contract":"DECISION_AT_M1_CLOSE_THEN_NEXT_M1_OPEN",
+        "label_horizon_minutes":HORIZON,
+        "samples":int(len(samples)),
+        "market_days":days,
+        "samples_per_market_day":float(len(samples)/days if days else 0.0),
+        "direction_agreement_samples":agreement,
+        "trend_conflict_samples":conflicts,
+        "excluded":exclusions,
+        "aug14_used":False,
     }
     (OUT / "PREPARE_611_MANIFEST.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     by_month.to_csv(OUT / "samples_611_by_month.csv", index=False)
 
-    print("=" * 78)
-    print("6/1/1 M1-TIMING PREPARE - MAR 01 -> AUG 13 2026")
-    print("DECISION=EVERY CLOSED M1")
-    print("M1=last 6 closed bars | M5=direction EMA9/21 | M15=direction close/EMA50")
-    print("ENTRY=next M1 open | LABEL=15m future path, target-only")
-    print("=" * 78)
+    print("="*78)
+    print("6/1/1 M1-CENTRIC PREPARE | MAR 01 -> AUG 13 2026")
+    print("EVERY CLOSED M1 IS ELIGIBLE; M5/M15 CONFLICT IS A FEATURE, NOT A FILTER")
+    print("M1=6 timing bars | M5=primary direction | M15=context direction")
+    print("ENTRY=next M1 open | LABEL=next 15 minutes, target only")
+    print("="*78)
     print("PREPARE_611=PASS")
     print(f"SAMPLES={len(samples):,}")
-    print(f"MARKET_DAYS={market_days}")
-    print(f"SAMPLES_PER_MARKET_DAY={per_day:.2f}")
-    print(f"LONGS={longs:,} SHORTS={shorts:,}")
+    print(f"MARKET_DAYS={days}")
+    print(f"SAMPLES_PER_MARKET_DAY={len(samples)/days:.2f}")
+    print(f"DIRECTION_AGREEMENT={agreement:,}")
+    print(f"TREND_CONFLICT_KEPT={conflicts:,}")
+    print(f"CONFLICT_RATE_PCT={conflicts/len(samples)*100.0:.2f}")
     print("AUG14_USED_IN_FEATURES=NO")
     print("AUG14_USED_IN_LABELS=NO")
     print("FUTURE_LABELS_USED_AS_FEATURES=NO")
